@@ -2,6 +2,7 @@ module Main exposing (..)
 
 import Browser
 import Browser.Dom as Dom
+import Browser.Events as BrowerEvt
 import Html exposing (Attribute, Html, div, input, text)
 import Html.Attributes exposing (..)
 import Html.Events as Events exposing (onInput)
@@ -57,7 +58,7 @@ main =
         { init = \() -> ( dropDownComponent.init, Cmd.none )
         , view = dropDownComponent.view
         , update = dropDownComponent.update
-        , subscriptions = \_ -> Sub.none
+        , subscriptions = dropDownComponent.subs
         }
 
 
@@ -66,6 +67,7 @@ dropDownComponent =
     { init = init
     , update = update
     , view = drawDropDown
+    , subs = dropDownSubs
     }
 
 
@@ -73,6 +75,7 @@ type alias DropDownComponent =
     { init : DropDown
     , update : DropDownMsg -> DropDown -> ( DropDown, Cmd DropDownMsg )
     , view : DropDown -> Html DropDownMsg
+    , subs : DropDown -> Sub DropDownMsg
     }
 
 
@@ -101,6 +104,7 @@ type UIPart
 
 type DropDownMsg
     = MouseEnter UIPart
+    | MenuRendered
     | Open MenuDir
     | MouseLeave UIPart
     | Close
@@ -116,8 +120,15 @@ type alias Item =
     }
 
 
+type MenuState
+    = Closed
+    | Rendering
+    | Rendered
+    | Opened
+
+
 type alias DropDown =
-    { open : Bool
+    { open : MenuState
     , selected : ItemId
     , hovered : Maybe ItemId
     , focused : Maybe ItemId
@@ -125,6 +136,7 @@ type alias DropDown =
     , menuDir : MenuDir
     , hoveringBot : Bool
     , hoveringMenu : Bool
+    , focusOnOpen : Bool
     }
 
 
@@ -136,7 +148,7 @@ type alias Activity =
 
 init : DropDown
 init =
-    { open = False
+    { open = Closed
     , selected = ItemId 0
     , hovered = Nothing
     , focused = Nothing
@@ -144,6 +156,7 @@ init =
     , menuDir = DownMenu
     , hoveringBot = False
     , hoveringMenu = False
+    , focusOnOpen = False
     }
 
 
@@ -179,17 +192,27 @@ mapKey i b =
 -- UPDATE
 
 
-openMenu : MenuDir -> DropDown -> DropDown
-openMenu md dd =
-    cond (not dd.open)
-        { dd | open = True, menuDir = md, hovered = Nothing }
+isOpen : DropDown -> Bool
+isOpen dd =
+    Closed /= dd.open
+
+
+isClosed : DropDown -> Bool
+isClosed =
+    isOpen >> not
+
+
+openMenu : DropDown -> DropDown
+openMenu dd =
+    cond (not <| isOpen dd)
+        { dd | open = Rendering, hovered = Nothing }
         dd
 
 
 closeMenu : DropDown -> DropDown
 closeMenu dd =
-    cond dd.open
-        { dd | open = False, hovered = Nothing, focused = Nothing }
+    cond (isOpen dd)
+        { dd | open = Closed, hovered = Nothing, focused = Nothing }
         dd
 
 
@@ -237,6 +260,11 @@ attemptFocusItem id =
     attemptFocus (itemIdstr id) (ItemFocused id)
 
 
+attemptFocusButton : Cmd DropDownMsg
+attemptFocusButton =
+    attemptFocus buttonIdStr NoOp
+
+
 openingDirection : Dom.Element -> MenuDir
 openingDirection e =
     let
@@ -253,8 +281,8 @@ openingDirection e =
         DownMenu
 
 
-attempOpenMenu : Cmd DropDownMsg
-attempOpenMenu =
+attemptShowMenu : Cmd DropDownMsg
+attemptShowMenu =
     Task.attempt
         (Result.map (openingDirection >> Open)
             >> Result.withDefault NoOp
@@ -305,12 +333,22 @@ hoverPart b part dd =
             { dd | hoveringBot = b }
 
 
+dropDownSubs : DropDown -> Sub DropDownMsg
+dropDownSubs dd =
+    if dd.open == Rendering then
+        BrowerEvt.onAnimationFrame (always MenuRendered)
+
+    else
+        Sub.none
+
+
 update : DropDownMsg -> DropDown -> ( DropDown, Cmd DropDownMsg )
 update msg dd =
     case msg of
         MouseEnter part ->
             ( hoverPart True part dd
-            , cond (isMouseOvered dd) Cmd.none attempOpenMenu
+                |> openMenu
+            , Cmd.none
             )
 
         MouseLeave part ->
@@ -323,8 +361,13 @@ update msg dd =
             , cond (isMouseOvered newDD) Cmd.none attemptCloseMenu
             )
 
+        MenuRendered ->
+            ( { dd | open = Rendered }, attemptShowMenu )
+
         Open menuDir ->
-            ( openMenu menuDir dd, Cmd.none )
+            ( { dd | open = Opened, menuDir = menuDir, focusOnOpen = False }
+            , cond dd.focusOnOpen (attemptFocusItem firstItem) Cmd.none
+            )
 
         Close ->
             ( cond (isMouseOvered dd || dd.focused /= Nothing) dd (closeMenu dd), Cmd.none )
@@ -337,7 +380,7 @@ update msg dd =
                 |> select i
                 |> closeMenu
             , dd.focused
-                |> Maybe.map (always (attemptFocus buttonIdStr NoOp))
+                |> Maybe.map (always attemptFocusButton)
                 |> Maybe.withDefault Cmd.none
             )
 
@@ -345,7 +388,7 @@ update msg dd =
             ( setFocus id dd, Cmd.none )
 
         ButtonKeyPress Select ->
-            if dd.open then
+            if isOpen dd then
                 if dd.focused == Nothing then
                     ( dd, attemptFocusItem firstItem )
 
@@ -353,10 +396,16 @@ update msg dd =
                     ( closeMenu dd, attemptFocus buttonIdStr NoOp )
 
             else
-                ( dd, Cmd.batch [ attempOpenMenu, attemptFocusItem firstItem ] )
+                ( { dd | focusOnOpen = True }
+                    |> openMenu
+                , Cmd.none
+                )
 
         ButtonKeyPress Tab ->
             ( closeMenu dd, Cmd.none )
+
+        ButtonKeyPress Tabback ->
+            ( closeMenu dd, attemptFocusButton )
 
         ButtonKeyPress Down ->
             let
@@ -419,7 +468,7 @@ itemStyle act =
 
 
 menuStyle : Bool -> MenuDir -> List (Html.Attribute DropDownMsg)
-menuStyle visible dir =
+menuStyle invisible dir =
     styles
         ([ ( "bottom", cond (dir == UpMenu) "50px" "50" )
          , ( "background-color", "#f1f1f1" )
@@ -428,7 +477,7 @@ menuStyle visible dir =
          , ( "z-index", "1" )
          , ( "position", "absolute" )
          ]
-            ++ cond visible [] [ ( "visibility", "hidden" ) ]
+            ++ cond invisible [ ( "visibility", "hidden" ) ] []
         )
 
 
@@ -474,7 +523,7 @@ dropDownItem act id itm =
 dropDownMenu : DropDown -> Html DropDownMsg
 dropDownMenu dd =
     div
-        (menuStyle dd.open dd.menuDir
+        (menuStyle (dd.open /= Opened) dd.menuDir
             ++ [ Html.Attributes.tabindex -1
                , Events.onMouseLeave (MouseLeave MenuArea)
                , Events.onMouseEnter (MouseEnter MenuArea)
@@ -504,7 +553,8 @@ drawDropDown dd =
                         )
                    ]
             )
-            [ dropDownButton dd
-            , dropDownMenu dd
-            ]
+            ([ dropDownButton dd
+             ]
+                ++ cond (isOpen dd) [ dropDownMenu dd ] []
+            )
         ]
