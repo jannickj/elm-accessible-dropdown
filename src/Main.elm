@@ -82,6 +82,7 @@ type ItemId
 
 type DropDownKeys
     = Tab
+    | Tabback
     | Select
     | Down
     | Up
@@ -146,8 +147,8 @@ init =
     }
 
 
-mapKey : Int -> DropDownKeys
-mapKey i =
+mapKey : Int -> Bool -> DropDownKeys
+mapKey i b =
     case i of
         -- Enter
         13 ->
@@ -159,7 +160,7 @@ mapKey i =
 
         -- Tab
         9 ->
-            Tab
+            cond b Tabback Tab
 
         -- ArrowUp
         38 ->
@@ -169,8 +170,9 @@ mapKey i =
         40 ->
             Down
 
-        _ ->
-            NoAction
+        x ->
+            Debug.log "key: " x
+                |> always NoAction
 
 
 
@@ -495,9 +497,10 @@ drawDropDown dd =
         [ div
             (componentStyle
                 ++ [ Events.on "keydown"
-                        (Decode.map
-                            (mapKey >> ButtonKeyPress)
-                            Events.keyCode
+                        (Decode.map2
+                            (\i b -> ButtonKeyPress (mapKey i b))
+                            (Decode.field "keyCode" Decode.int)
+                            (Decode.field "shiftKey" Decode.bool)
                         )
                    ]
             )
